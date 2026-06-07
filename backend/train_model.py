@@ -1,8 +1,8 @@
 """
-Train a Linear Regression model on housing data and save it.
-Uses the Kaggle Housing Prices dataset format.
-If no CSV is provided, generates synthetic training data.
+Train a Linear Regression model on Israeli housing deals data (נדל"ן).
+CSV source: עסקאות נדל"ן רשות המסים / data.gov.il
 """
+
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression
@@ -11,86 +11,102 @@ from sklearn.metrics import r2_score, mean_absolute_error
 import joblib
 import os
 
-def generate_synthetic_data(n=1000):
-    """Generate synthetic housing data resembling Israeli market."""
-    np.random.seed(42)
-    area = np.random.uniform(25, 400, n)
-    bedrooms = np.random.choice([1, 2, 3, 4, 5, 6], n, p=[0.05, 0.15, 0.35, 0.25, 0.15, 0.05])
-    bathrooms = np.random.choice([1, 2, 3, 4], n, p=[0.2, 0.4, 0.3, 0.1])
-    stories = np.random.choice(range(1, 10), n)
-    parking = np.random.choice([0, 1, 2, 3], n, p=[0.2, 0.4, 0.3, 0.1])
-    mainroad = np.random.choice([0, 1], n, p=[0.3, 0.7])
-    airconditioning = np.random.choice([0, 1], n, p=[0.4, 0.6])
-    furnishing = np.random.choice([0, 1, 2], n, p=[0.3, 0.4, 0.3])  # 0=unfurnished, 1=semi, 2=furnished
+# מילון המרת קומות מעברית למספרים
+FLOOR_MAP = {
+    'מרתף': -1, 'קרקע': 0,
+    'ראשונה': 1, 'שניה': 2, 'שנייה': 2, 'שלישית': 3, 'רביעית': 4,
+    'חמישית': 5, 'שישית': 6, 'שביעית': 7, 'שמינית': 8,
+    'תשיעית': 9, 'עשירית': 10,
+}
 
-    # Generate realistic prices (in ILS-like scale)
-    price = (
-        1_200_000
-        + area * 35_000
-        + bedrooms * 250_000
-        + bathrooms * 450_000
-        + stories * 380_000
-        + parking * 280_000
-        + mainroad * 550_000
-        + airconditioning * 620_000
-        + (furnishing == 2) * 500_000
-        + (furnishing == 1) * 250_000
-        + np.log(area / 100 + 1) * 500_000
-        + np.random.normal(0, 300_000, n)  # noise
+def parse_floor(val):
+    if pd.isna(val):
+        return np.nan
+    s = str(val).strip()
+    if s in FLOOR_MAP:
+        return FLOOR_MAP[s]
+    # ניסיון לחלץ מספר ("קומה 5", "11")
+    try:
+        return float(''.join(c for c in s if c.isdigit() or c == '.'))
+    except Exception:
+        return np.nan
+
+def load_and_clean(csv_path):
+    df = pd.read_csv(csv_path)
+    print(f"נטענו {len(df)} שורות גולמיות")
+
+    # 1) מחיר: "750,000" -> 750000
+    df['price'] = (
+        df['dealamount'].astype(str)
+        .str.replace(',', '', regex=False)
+        .str.replace('"', '', regex=False)
+        .replace('nan', np.nan)
     )
+    df['price'] = pd.to_numeric(df['price'], errors='coerce')
 
-    df = pd.DataFrame({
-        'area': area,
-        'bedrooms': bedrooms,
-        'bathrooms': bathrooms,
-        'stories': stories,
-        'parking': parking,
-        'mainroad': mainroad,
-        'airconditioning': airconditioning,
-        'furnishingstatus': furnishing,
-        'price': price
-    })
+    # 2) שטח: dealnature לפעמים מספר, לפעמים טקסט
+    df['area'] = pd.to_numeric(df['dealnature'], errors='coerce')
+
+    # 3) קומה
+    df['floor'] = df['floorno'].apply(parse_floor)
+
+    # 4) חדרים
+    df['rooms'] = pd.to_numeric(df['assetroomno'], errors='coerce')
+
+    # 5) שנת בנייה -> גיל בעת העסקה
+    df['build_year'] = pd.to_numeric(df['buildingyear'], errors='coerce')
+    df['deal_year'] = pd.to_datetime(df['dealdate'], format='%d.%m.%Y', errors='coerce').dt.year
+    df['age'] = df['deal_year'] - df['build_year']
+
+    # 6) קומות בבניין
+    df['total_floors'] = pd.to_numeric(df['buildingfloors'], errors='coerce')
+
+    # 7) סינון: רק עסקאות מ-2020 ואילך
+    df = df[df['deal_year'] >= 2020]
+    print(f"אחרי סינון 2020+: {len(df)} שורות")
+
+    # 8) שדות חובה
+    df = df.dropna(subset=['price', 'area'])
+
+    # 9) השלמות הגיוניות
+    df['rooms'] = df['rooms'].fillna((df['area'] / 25).round().clip(1, 8))
+    df['floor'] = df['floor'].fillna(2)
+    df['age'] = df['age'].fillna(df['age'].median())
+    df['total_floors'] = df['total_floors'].fillna(df['total_floors'].median())
+
+    # 10) הסרת חריגים
+    df = df[(df['price'] > 200_000) & (df['price'] < 20_000_000)]
+    df = df[(df['area'] > 15) & (df['area'] < 500)]
+
+    print(f"אחרי ניקוי: {len(df)} שורות")
     return df
 
 def train():
     csv_path = os.path.join(os.path.dirname(__file__), 'housing_data.csv')
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"לא נמצא: {csv_path}")
 
-    if os.path.exists(csv_path):
-        print(f"Loading data from {csv_path}")
-        df = pd.read_csv(csv_path)
-        # Convert categorical columns if needed
-        if df['mainroad'].dtype == object:
-            df['mainroad'] = (df['mainroad'] == 'yes').astype(int)
-        if df['airconditioning'].dtype == object:
-            df['airconditioning'] = (df['airconditioning'] == 'yes').astype(int)
-        if df['furnishingstatus'].dtype == object:
-            mapping = {'unfurnished': 0, 'semi-furnished': 1, 'furnished': 2}
-            df['furnishingstatus'] = df['furnishingstatus'].map(mapping)
-    else:
-        print("No housing_data.csv found. Generating synthetic data...")
-        df = generate_synthetic_data(1000)
-        df.to_csv(csv_path, index=False)
-        print(f"Saved synthetic data to {csv_path}")
+    df = load_and_clean(csv_path)
 
-    features = ['area', 'bedrooms', 'bathrooms', 'stories', 'parking',
-                'mainroad', 'airconditioning', 'furnishingstatus']
+    features = ['area', 'rooms', 'floor', 'age', 'total_floors']
+    X = df[features]
+    y = df['price']
 
-    X = df[features].values
-    y = df['price'].values
-
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
 
     model = LinearRegression()
     model.fit(X_train, y_train)
 
-    y_pred = model.predict(X_test)
-    r2 = r2_score(y_test, y_pred)
-    mae = mean_absolute_error(y_test, y_pred)
+    preds = model.predict(X_test)
+    r2 = r2_score(y_test, preds)
+    mae = mean_absolute_error(y_test, preds)
 
-    print(f"\n=== Model Performance ===")
-    print(f"R² Score: {r2:.4f}")
-    print(f"MAE: {mae:,.0f}")
-    print(f"\nCoefficients:")
+    print(f"\n=== תוצאות ===")
+    print(f"R² = {r2:.3f}")
+    print(f"MAE = ₪{mae:,.0f}")
+    print(f"\nמקדמים:")
     for name, coef in zip(features, model.coef_):
         print(f"  {name}: {coef:,.2f}")
     print(f"  intercept: {model.intercept_:,.2f}")
@@ -102,7 +118,7 @@ def train():
         'r2_score': r2,
         'mae': mae,
     }, model_path)
-    print(f"\nModel saved to {model_path}")
+    print(f"\nנשמר ב-{model_path}")
 
 if __name__ == '__main__':
     train()

@@ -1,69 +1,202 @@
 import { useState } from "react";
-import heroBg from "@/assets/hero-bg.jpg";
-import PredictionForm from "@/components/PredictionForm";
-import PredictionResult from "@/components/PredictionResult";
-import type { HousingInput } from "@/lib/prediction";
-import { Brain } from "lucide-react";
+import { toast, Toaster } from "sonner";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
-interface PriceResult {
-  predicted: number;
-  low: number;
-  high: number;
-  confidence: number;
-}
+const API_URL = "http://localhost:5000/api/predict";
+const CURRENT_YEAR = new Date().getFullYear();
+
+const FLOOR_OPTIONS = [
+  { value: "קרקע", label: "קרקע" },
+  { value: "ראשונה", label: "ראשונה" },
+  { value: "שניה", label: "שניה" },
+  { value: "שלישית", label: "שלישית" },
+  { value: "רביעית", label: "רביעית" },
+  { value: "חמישית", label: "חמישית" },
+  { value: "שישית", label: "שישית" },
+  { value: "שביעית", label: "שביעית" },
+  { value: "שמינית", label: "שמינית" },
+];
+
+type RangeInfo = { low: number; high: number; confidence: number };
 
 export default function Index() {
-  const [result, setResult] = useState<PriceResult | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [form, setForm] = useState({
+    area: "",
+    rooms: "",
+    floor: "ראשונה",
+    buildingyear: "",
+    total_floors: "",
+  });
+  const [price, setPrice] = useState<number | null>(null);
+  const [range, setRange] = useState<RangeInfo | null>(null);
+  const [loading, setLoading] = useState(false);
 
-  const handlePredict = async (input: HousingInput) => {
-    setIsLoading(true);
+  const update = (k: string, v: string) =>
+    setForm((p) => ({ ...p, [k]: v }));
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    const area = parseFloat(form.area);
+    const rooms = parseFloat(form.rooms);
+    const total_floors = parseInt(form.total_floors);
+    const buildingyear = parseInt(form.buildingyear);
+
+    if (!(area > 0)) return toast.error("שטח חייב להיות גדול מ-0");
+    if (!(rooms > 0)) return toast.error("מספר חדרים חייב להיות גדול מ-0");
+    if (!(total_floors > 0))
+      return toast.error("סה״כ קומות בבניין חייב להיות גדול מ-0");
+    if (!buildingyear || buildingyear < 1800 || buildingyear > CURRENT_YEAR)
+      return toast.error(`שנת בנייה חייבת להיות בין 1800 ל-${CURRENT_YEAR}`);
+
+    setLoading(true);
+    setPrice(null);
+    setRange(null);
     try {
-      const res = await fetch("http://localhost:5000/api/predict", {
+      const res = await fetch(API_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(input),
+        body: JSON.stringify({
+          area,
+          rooms,
+          floor: form.floor,
+          buildingyear,
+          total_floors,
+        }),
       });
+      if (!res.ok) throw new Error("Prediction failed");
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
-      setResult(data);
+      console.log("API response:", data);
+
+      const p =
+        data.predicted ??
+        data.predicted_price ??
+        data.price ??
+        data.prediction;
+
+      if (typeof p !== "number" || !isFinite(p)) {
+        toast.error("תשובה לא תקינה מהשרת");
+        return;
+      }
+      setPrice(p);
+
+      if (typeof data.low === "number" && typeof data.high === "number") {
+        setRange({
+          low: data.low,
+          high: data.high,
+          confidence:
+            typeof data.confidence === "number" ? data.confidence : 0,
+        });
+      }
     } catch (err) {
-      console.error("Prediction failed:", err);
+      console.error(err);
+      toast.error("שגיאה בחיזוי המחיר");
     } finally {
-      setIsLoading(false);
+      setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen">
-      {/* Hero */}
-      <div className="relative h-64 md:h-80 overflow-hidden">
-        <img src={heroBg} alt="" className="absolute inset-0 w-full h-full object-cover opacity-40" width={1920} height={800} />
-        <div className="absolute inset-0 bg-gradient-to-b from-background/30 to-background" />
-        <div className="relative z-10 flex flex-col items-center justify-center h-full text-center px-4">
-          <div className="flex items-center gap-2 mb-3">
-            <Brain className="h-8 w-8 text-primary" />
-            <h1 className="text-3xl md:text-4xl font-bold tracking-tight">
-              Housing Price <span className="text-primary glow-text">Predictor</span>
-            </h1>
-          </div>
-          <p className="text-muted-foreground max-w-lg text-sm md:text-base">
-            Multiple Linear Regression model trained on real housing data. Enter property features to get an instant price estimate.
-          </p>
-        </div>
-      </div>
+    <div dir="rtl" className="min-h-screen flex items-center justify-center bg-background p-4">
+      <Toaster richColors position="top-center" />
+      <Card className="w-full max-w-lg">
+        <CardHeader>
+          <CardTitle className="text-center text-2xl">חיזוי מחיר דירה</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={submit} className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="area">שטח (מ״ר)</Label>
+              <Input
+                id="area"
+                type="number"
+                value={form.area}
+                onChange={(e) => update("area", e.target.value)}
+                required
+              />
+            </div>
 
-      {/* Main Content */}
-      <div className="container max-w-6xl mx-auto px-4 -mt-8 relative z-20 pb-16">
-        <div className="grid lg:grid-cols-5 gap-6">
-          <div className="lg:col-span-2">
-            <PredictionForm onPredict={handlePredict} isLoading={isLoading} />
-          </div>
-          <div className="lg:col-span-3">
-            <PredictionResult result={result} />
-          </div>
-        </div>
-      </div>
+            <div className="space-y-2">
+              <Label htmlFor="rooms">מספר חדרים</Label>
+              <Input
+                id="rooms"
+                type="number"
+                step="0.5"
+                value={form.rooms}
+                onChange={(e) => update("rooms", e.target.value)}
+                required
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>קומה</Label>
+              <Select value={form.floor} onValueChange={(v) => update("floor", v)}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {FLOOR_OPTIONS.map((o) => (
+                    <SelectItem key={o.value} value={o.value}>
+                      {o.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="total_floors">סה״כ קומות בבניין</Label>
+              <Input
+                id="total_floors"
+                type="number"
+                value={form.total_floors}
+                onChange={(e) => update("total_floors", e.target.value)}
+                required
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="buildingyear">שנת בנייה</Label>
+              <Input
+                id="buildingyear"
+                type="number"
+                value={form.buildingyear}
+                onChange={(e) => update("buildingyear", e.target.value)}
+                required
+              />
+            </div>
+
+            <Button type="submit" disabled={loading} className="w-full">
+              {loading ? "מחשב..." : "חזה מחיר"}
+            </Button>
+          </form>
+
+          {typeof price === "number" && (
+            <div className="mt-6 rounded-lg border bg-muted p-4 text-center">
+              <p className="text-sm text-muted-foreground">מחיר משוער</p>
+              <p className="mt-1 text-3xl font-bold">
+                ₪{price.toLocaleString("he-IL", { maximumFractionDigits: 0 })}
+              </p>
+              {range && (
+                <p className="mt-2 text-sm text-muted-foreground">
+                  טווח: ₪{range.low.toLocaleString("he-IL")} – ₪
+                  {range.high.toLocaleString("he-IL")}
+                </p>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }
